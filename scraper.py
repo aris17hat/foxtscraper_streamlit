@@ -176,7 +176,7 @@ st.title("🔍 Scraper d'emails et réseaux sociaux")
 st.markdown("Importe une liste de sites, lance le scraping, télécharge les résultats.")
 
 st.markdown("### 📥 Comment veux-tu entrer les sites ?")
-mode = st.radio("", ["✏️ Saisie manuelle (1 à 10 sites)", "📂 Importer un fichier (CSV, Excel, TXT)"], horizontal=True)
+mode = st.radio("Mode de saisie", ["✏️ Saisie manuelle (1 à 10 sites)", "📂 Importer un fichier (CSV, Excel, TXT)"], horizontal=True, label_visibility="collapsed")
 
 domains_input = []
 
@@ -221,7 +221,9 @@ if domains_input:
             progress_bar.progress(current / total)
             status_text.text(f"⏳ {current} / {total} sites traités")
 
-        results = asyncio.run(run_all(domains, max_concurrent, progress_callback))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        results = loop.run_until_complete(run_all(domains, max_concurrent, progress_callback))
         df_results = pd.DataFrame(results)
 
         social_cols = [c for c in ['facebook','instagram','linkedin','youtube','twitter','tiktok'] if c in df_results.columns]
