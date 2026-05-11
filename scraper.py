@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 import io
 import json
 from urllib.parse import urlparse
+from collections import Counter
+import string
 
 # ── Config ──────────────────────────────────────────────
 HEADERS = {
@@ -44,7 +46,17 @@ PAGES = ['/contact', '/contact-us', '/about', '/about-us', '/', '/a-propos',
          '/privacy-policy', '/terms-of-use', '/legal', '/mentions-legales',
          '/politique-de-confidentialite', '/mentions-lgales',
          '/mentions-legales-et-rgpd', '/mentions-legales-rgpd',
-         '/conditions-generales-dutilisation', '/cgu', '/rgpd']
+         '/conditions-generales-dutilisation', '/cgu', '/rgpd', '/terms-conditions']
+
+STOP_WORDS = {
+    'the','and','for','with','your','our','all','from','this','that',
+    'are','was','not','but','have','has','more','than','its','their',
+    'can','will','you','we','de','la','le','les','des','du','en','un',
+    'une','et','est','par','sur','dans','qui','que','pour','plus','avec',
+    'au','aux','se','son','sa','ils','elle','il','on','si','ne','pas',
+    'how','what','why','when','where','get','top','best','free','new',
+    'about','news','latest','online','home','page','site','web','www'
+}
 
 # ── Helpers ──────────────────────────────────────────────
 def extract_domain_and_path(url):
@@ -132,7 +144,7 @@ async def scrape_site(session, domain_input):
             url = f"{base}{page}"
             try:
                 async with session.get(url, headers=HEADERS,
-                                       timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
                         continue
                     html = await resp.text(errors='ignore')
@@ -163,7 +175,7 @@ async def run_all(domains, max_concurrent, progress_callback):
         tasks = [scrape_site(session, domain) for domain in domains]
         for i, coro in enumerate(asyncio.as_completed(tasks)):
             try:
-                result = await asyncio.wait_for(coro, timeout=60)
+                result = await asyncio.wait_for(coro, timeout=45)
             except Exception:
                 result = {'domain': domains[i], 'title': None, 'emails': None}
             results.append(result)
@@ -171,28 +183,43 @@ async def run_all(domains, max_concurrent, progress_callback):
     return results
 
 # ── Interface Streamlit ──────────────────────────────────
-st.set_page_config(page_title="Web Scraper", page_icon="🔍", layout="wide")
-st.title("🔍 Scraper d'emails et réseaux sociaux")
-st.markdown("Importe une liste de sites, lance le scraping, télécharge les résultats.")
+st.set_page_config(page_title="FoxtScraper", page_icon="🦊", layout="wide")
+st.title("🦊 FoxtScraper")
+st.markdown("Extrais les emails et réseaux sociaux de n'importe quel site web.")
 
-st.markdown("### 📥 Comment veux-tu entrer les sites ?")
-mode = st.radio("Mode de saisie", ["✏️ Saisie manuelle (1 à 10 sites)", "📂 Importer un fichier (CSV, Excel, TXT)"], horizontal=True, label_visibility="collapsed")
+# ── Historique session ────────────────────────────────────
+if 'historique' not in st.session_state:
+    st.session_state['historique'] = []
+
+# ── Mode de saisie ────────────────────────────────────────
+st.markdown("### 📥 Entrer les sites")
+mode = st.radio(
+    "Mode de saisie",
+    ["✏️ Saisie manuelle (1 à 10 sites)", "📂 Importer un fichier (CSV, Excel, TXT)"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
 domains_input = []
 
 if mode == "✏️ Saisie manuelle (1 à 10 sites)":
-    single = st.text_input("Un seul site", placeholder="ex: google.com")
-    multi = st.text_area("Ou jusqu'à 10 sites (un par ligne)", placeholder="google.com\nfacebook.com\ntwitter.com", height=150)
-    if single.strip():
-        domains_input = [single.strip()]
-    elif multi.strip():
+    multi = st.text_area(
+        "Un site par ligne (max 10)",
+        placeholder="google.com\nfacebook.com\ntwitter.com",
+        height=150
+    )
+    if multi.strip():
         lines = [l.strip() for l in multi.strip().split('\n') if l.strip()]
         if len(lines) > 10:
             st.warning("⚠️ Maximum 10 sites en saisie manuelle. Seuls les 10 premiers seront traités.")
             lines = lines[:10]
         domains_input = lines
 else:
-    uploaded_file = st.file_uploader("📂 Importe ton fichier", type=["csv", "xlsx", "xls", "txt"])
+    uploaded_file = st.file_uploader(
+        "Importe ton fichier",
+        type=["csv", "xlsx", "xls", "txt"],
+        label_visibility="collapsed"
+    )
     if uploaded_file:
         if uploaded_file.name.endswith('.txt'):
             content = uploaded_file.read().decode('utf-8')
@@ -205,73 +232,83 @@ else:
             df_input = pd.read_excel(uploaded_file)
             col_name = st.selectbox("Quelle colonne contient les URLs ?", df_input.columns.tolist())
             domains_input = df_input[col_name].dropna().tolist()
+
+        st.info(f"⚠️ Pour les grandes listes, le scraping se fait par blocs de 100 sites automatiquement.")
         st.success(f"✅ {len(domains_input)} sites chargés")
 
+# ── Lancement ─────────────────────────────────────────────
 if domains_input:
-    max_concurrent = 20
-
     if st.button("🚀 Lancer le scraping"):
         domains = pd.Series(domains_input).apply(clean_domain).drop_duplicates().tolist()
         st.info(f"🔄 {len(domains)} sites uniques à scraper...")
 
         progress_bar = st.progress(0)
         status_text = st.empty()
+        all_results = []
 
-        def progress_callback(current, total):
-            progress_bar.progress(current / total)
-            status_text.text(f"⏳ {current} / {total} sites traités")
+        # Traitement par blocs de 100
+        bloc_size = 100
+        total = len(domains)
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(run_all(domains, max_concurrent, progress_callback))
-        df_results = pd.DataFrame(results)
+        def progress_callback(current, total_bloc):
+            done = len(all_results) + current
+            progress_bar.progress(min(done / total, 1.0))
+            status_text.text(f"⏳ {done} / {total} sites traités")
 
+        for i in range(0, total, bloc_size):
+            bloc = domains[i:i + bloc_size]
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            results_bloc = loop.run_until_complete(
+                run_all(bloc, 20, progress_callback)
+            )
+            loop.close()
+            all_results.extend(results_bloc)
+
+        df_results = pd.DataFrame(all_results)
+
+        # Ajouter à l'historique de session
+        st.session_state['historique'].extend(all_results)
+
+        st.session_state['df_all'] = df_results
+
+        # Filtrer ceux avec au moins un contact
         social_cols = [c for c in ['facebook','instagram','linkedin','youtube','twitter','tiktok'] if c in df_results.columns]
         has_contact = df_results['emails'].notna()
         if social_cols:
             has_contact = has_contact | df_results[social_cols].notna().any(axis=1)
-        df_results = df_results[has_contact].reset_index(drop=True)
+        df_with_contact = df_results[has_contact].reset_index(drop=True)
+        st.session_state['df_results'] = df_with_contact
 
-        st.session_state['df_results'] = df_results
-
+# ── Résultats ─────────────────────────────────────────────
 if 'df_results' in st.session_state:
     df_results = st.session_state['df_results']
+    df_all = st.session_state.get('df_all', df_results)
 
-    st.success(f"✅ {len(df_results)} sites avec contacts trouvés !")
+    st.success(f"✅ {len(df_results)} sites avec contacts trouvés sur {len(df_all)} scrapés !")
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📧 Emails", df_results['emails'].notna().sum())
     col2.metric("💼 LinkedIn", df_results['linkedin'].notna().sum() if 'linkedin' in df_results.columns else 0)
     col3.metric("▶️ YouTube", df_results['youtube'].notna().sum() if 'youtube' in df_results.columns else 0)
     col4.metric("🐦 Twitter", df_results['twitter'].notna().sum() if 'twitter' in df_results.columns else 0)
 
-    # ── Tableau des résultats ────────────────────────────
+    # Tableau résultats
     st.markdown("### 📊 Résultats")
     st.dataframe(df_results, use_container_width=True)
 
-    # ── Filtrage ─────────────────────────────────────────
+    # ── Filtrage ──────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🎯 Filtrer les résultats")
 
     filter_choice = st.radio(
-        "Que veux-tu télécharger ?",
+        "Filtre",
         ["📥 Tout télécharger sans filtre", "🔍 Filtrer par thématique"],
-        horizontal=True
+        horizontal=True,
+        label_visibility="collapsed"
     )
 
     if filter_choice == "🔍 Filtrer par thématique":
-        from collections import Counter
-        import string
-
-        STOP_WORDS = {
-            'the','and','for','with','your','our','all','from','this','that',
-            'are','was','not','but','have','has','more','than','its','their',
-            'can','will','you','we','de','la','le','les','des','du','en','un',
-            'une','et','est','par','sur','dans','qui','que','pour','plus','avec',
-            'au','aux','se','son','sa','ils','elle','il','on','si','ne','pas',
-            'how','what','why','when','where','get','top','best','free','new',
-            'about','news','latest','online','home','page','site','web','www'
-        }
-
         all_titles = df_results['title'].dropna().tolist()
         words = []
         for title in all_titles:
@@ -282,15 +319,14 @@ if 'df_results' in st.session_state:
 
         top_words = [word for word, count in Counter(words).most_common(30)]
 
-        st.markdown("**💡 Mots-clés suggérés** (extraits automatiquement des titres) :")
         selected_tags = st.multiselect(
-            "Sélectionne un ou plusieurs mots-clés :",
+            "💡 Mots-clés suggérés :",
             options=top_words,
             default=[]
         )
 
         manual_keywords = st.text_input(
-            "➕ Ajoute tes propres mots-clés (séparés par des virgules)",
+            "➕ Tes propres mots-clés (séparés par des virgules)",
             placeholder="ex: igaming, casino, cbd, crypto"
         )
 
@@ -314,16 +350,50 @@ if 'df_results' in st.session_state:
     else:
         df_to_export = df_results
 
-    # ── Export avec nom personnalisé ─────────────────────
+    # ── Export double ─────────────────────────────────────
     st.markdown("---")
-    file_name = st.text_input("📝 Nom du fichier à télécharger", value="resultats_scraping")
+    st.markdown("### ⬇️ Télécharger les résultats")
+
+    file_name = st.text_input("📝 Nom du fichier", value="resultats_scraping")
     file_name = file_name.strip().replace(" ", "_") or "resultats_scraping"
 
-    csv_buffer = io.StringIO()
-    df_to_export.to_csv(csv_buffer, index=False)
-    st.download_button(
-        label="⬇️ Télécharger les résultats CSV",
-        data=csv_buffer.getvalue(),
-        file_name=f"{file_name}.csv",
+    col_a, col_b = st.columns(2)
+
+    # Fichier 1 — avec contacts uniquement
+    buf1 = io.StringIO()
+    df_to_export.to_csv(buf1, index=False)
+    col_a.download_button(
+        label=f"⬇️ Avec contacts ({len(df_to_export)} sites)",
+        data=buf1.getvalue(),
+        file_name=f"{file_name}_avec_contacts.csv",
         mime="text/csv"
     )
+
+    # Fichier 2 — tous les sites
+    buf2 = io.StringIO()
+    df_all.to_csv(buf2, index=False)
+    col_b.download_button(
+        label=f"⬇️ Tous les sites ({len(df_all)} sites)",
+        data=buf2.getvalue(),
+        file_name=f"{file_name}_tous.csv",
+        mime="text/csv"
+    )
+
+    # ── Historique session ────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🕓 Historique de la session")
+
+    if st.session_state['historique']:
+        df_historique = pd.DataFrame(st.session_state['historique']).drop_duplicates(subset='domain')
+        st.info(f"📦 {len(df_historique)} sites uniques scrapés depuis le début de la session")
+
+        buf_hist = io.StringIO()
+        df_historique.to_csv(buf_hist, index=False)
+        st.download_button(
+            label="⬇️ Télécharger tout l'historique de la session",
+            data=buf_hist.getvalue(),
+            file_name=f"{file_name}_historique_session.csv",
+            mime="text/csv"
+        )
+    else:
+        st.caption("L'historique s'accumule au fil des scrapings de cette session.")
