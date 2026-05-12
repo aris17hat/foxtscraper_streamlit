@@ -233,7 +233,7 @@ else:
             col_name = st.selectbox("Quelle colonne contient les URLs ?", df_input.columns.tolist())
             domains_input = df_input[col_name].dropna().tolist()
 
-        st.info(f"⚠️ Pour les grandes listes, le scraping se fait par blocs de 100 sites automatiquement.")
+        st.info(f"⚠️ Pour les grandes listes, le scraping se fait par blocs de 50 sites automatiquement.")
         st.success(f"✅ {len(domains_input)} sites chargés")
 
 # ── Lancement ─────────────────────────────────────────────
@@ -246,8 +246,8 @@ if domains_input:
         status_text = st.empty()
         all_results = []
 
-        # Traitement par blocs de 100
-        bloc_size = 100
+        # Traitement par blocs de 50
+        bloc_size = 50
         total = len(domains)
 
         def progress_callback(current, total_bloc):
